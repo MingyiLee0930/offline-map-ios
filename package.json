@@ -1,11 +1,12 @@
 {
   "name": "offline-map",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "離線地圖 iPhone App（Capacitor）",
   "dependencies": {
     "@capacitor-community/background-geolocation": "1.2.26",
     "@capacitor-community/keep-awake": "7.1.0",
+    "@capacitor/app": "7.1.2",
     "@capacitor/cli": "7.6.9",
     "@capacitor/core": "7.6.9",
     "@capacitor/filesystem": "7.1.8",

@@ -42,7 +42,7 @@ const NP = {};
 let NATIVE_ERR = '';
 if (NATIVE) {
   const reg = (window.capacitorExports && window.capacitorExports.registerPlugin) || window.Capacitor.registerPlugin;
-  for (const n of ['BackgroundGeolocation', 'Filesystem', 'LocalNotifications', 'Share', 'Haptics', 'KeepAwake', 'CapacitorHttp']) {
+  for (const n of ['App', 'BackgroundGeolocation', 'Filesystem', 'LocalNotifications', 'Share', 'Haptics', 'KeepAwake', 'CapacitorHttp']) {
     try { NP[n] = reg(n); } catch (e) { NATIVE_ERR += n + ' '; }
   }
 }
@@ -166,9 +166,9 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 
 /* ---------- 圖層 ---------- */
 const LAYERS = {
-  rudy: { name: '魯地圖', desc: '台灣登山首選，含等高線、步道、山屋', url: 'https://rudy.tile.basecamp.tw/{z}/{x}/{y}.png',
+  rudy: { name: '魯地圖', desc: '台灣登山首選，含等高線、步道、山屋', url: 'https://tile.happyman.idv.tw/map/rudy/{z}/{x}/{y}.png',
     maxNative: 17, kb: 28, dl: true, attr: '魯地圖 Rudy Map © OSM contributors', sw: 'linear-gradient(135deg,#e9efd9,#c9dcb3 45%,#f3e6c8)' },
-  moi: { name: '魯地圖 清爽版', desc: '等高線清晰、配色淡雅', url: 'https://rs.happyman.idv.tw/map/moi_osm/{z}/{x}/{y}.png',
+  moi: { name: '魯地圖 清爽版', desc: '等高線清晰、配色淡雅', url: 'https://tile.happyman.idv.tw/map/moi_osm/{z}/{x}/{y}.png',
     maxNative: 17, kb: 24, dl: true, attr: 'MOI.OSM © happyman / OSM contributors', sw: 'linear-gradient(135deg,#f4f1ea,#e2e6dc 50%,#d6dfd0)' },
   emap: { name: '台灣通用電子地圖', desc: '國土測繪中心，含 20m 等高線', url: 'https://wmts.nlsc.gov.tw/wmts/EMAP/default/GoogleMapsCompatible/{z}/{y}/{x}',
     maxNative: 18, kb: 22, dl: true, attr: '© 內政部國土測繪中心', sw: 'linear-gradient(135deg,#f6f2e6,#e7e0cc 50%,#cfe0e8)' },

@@ -14,7 +14,11 @@ plutil -replace UIBackgroundModes -json '["location"]' "$PL"
 plutil -replace LSApplicationQueriesSchemes -json '["sms","tel"]' "$PL"
 plutil -replace ITSAppUsesNonExemptEncryption -bool NO "$PL"
 plutil -replace UIFileSharingEnabled -bool YES "$PL"
-plutil -replace LSSupportsOpeningDocumentsInPlace -bool YES "$PL"
+plutil -replace LSSupportsOpeningDocumentsInPlace -bool NO "$PL"
+
+# 讓 iPhone 的「分享 / 以其他 App 開啟」清單出現「離線地圖」（GPX 檔）
+plutil -replace UTImportedTypeDeclarations -json '[{"UTTypeIdentifier":"com.topografix.gpx","UTTypeDescription":"GPS Exchange Format","UTTypeConformsTo":["public.xml","public.data"],"UTTypeTagSpecification":{"public.filename-extension":["gpx","GPX"],"public.mime-type":["application/gpx+xml","application/gpx"]}}]' "$PL"
+plutil -replace CFBundleDocumentTypes -json '[{"CFBundleTypeName":"GPX 路線","CFBundleTypeRole":"Viewer","LSHandlerRank":"Alternate","LSItemContentTypes":["com.topografix.gpx","public.xml"]}]' "$PL"
 plutil -replace UISupportedInterfaceOrientations -json '["UIInterfaceOrientationPortrait"]' "$PL"
 plutil -lint "$PL"
 

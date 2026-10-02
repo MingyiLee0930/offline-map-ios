@@ -597,23 +597,39 @@ async function copyText(s) {
 }
 
 /* 路線 */
+async function saveGpxRoute(text, fname) {
+  const g = parseGPX(text, fname);
+  const P = prepRoute(g.pts);
+  const r = { id: uid(), name: g.name, pts: g.pts, wpts: g.wpts, created: Date.now(), length: P.length, up: P.up };
+  await DB.put('routes', r);
+  return r;
+}
+async function afterImport(list) {
+  if (!list.length) return;
+  toast(`已匯入 ${list.length} 條路線`);
+  if (list.length === 1) { await setActiveRoute(list[0].id, true); closeSheet(); }
+  else renderSheet();
+}
 $('#gpxInput').onchange = async e => {
   const files = [...e.target.files]; e.target.value = '';
-  let last = null, ok = 0;
+  const done = [];
   for (const f of files) {
-    try {
-      const g = parseGPX(await f.text(), f.name);
-      const P = prepRoute(g.pts);
-      const r = { id: uid(), name: g.name, pts: g.pts, wpts: g.wpts, created: Date.now(), length: P.length, up: P.up };
-      await DB.put('routes', r); last = r; ok++;
-    } catch (err) { toast(`${f.name}：${err.message}`, 3500); }
+    try { done.push(await saveGpxRoute(await f.text(), f.name)); }
+    catch (err) { toast(`${f.name}：${err.message}`, 3500); }
   }
-  if (ok) {
-    toast(`已匯入 ${ok} 條路線`);
-    if (ok === 1) { await setActiveRoute(last.id, true); closeSheet(); }
-    else renderSheet();
-  }
+  afterImport(done);
 };
+/* 原生 App：從 LINE、檔案、Email 等「分享 / 以其他 App 開啟」收到的 GPX */
+async function importFromUrl(url) {
+  if (!url || !/^file:/i.test(url)) return;
+  const name = decodeURIComponent(url.split('/').pop() || 'route.gpx');
+  try {
+    const r = await NP.Filesystem.readFile({ path: url, encoding: 'utf8' });
+    const route = await saveGpxRoute(typeof r.data === 'string' ? r.data : await r.data.text(), name);
+    NP.Filesystem.deleteFile({ path: url }).catch(() => {});
+    afterImport([route]);
+  } catch (err) { toast(`無法匯入 ${name}：${err.message || err}`, 4000); }
+}
 SHEETS.routes = {
   title: '路線',
   async render(el) {
@@ -764,7 +780,7 @@ SHEETS.settings = {
 };
 
 /* ---------- 離線下載 ---------- */
-let dl = { running: false };
+let dl = { running: false }, lastDlErr = null;
 const dlForm = { mode: 'view', routeId: null, radius: 1000, layers: null, zmin: 8, zmax: 16, name: '' };
 function buildArea() {
   const area = { id: uid(), created: Date.now(), layers: [...dlForm.layers], zmin: dlForm.zmin, zmax: dlForm.zmax, customUrl: S.customUrl };
@@ -791,9 +807,19 @@ async function fetchTile(u) {
   const b = await r.clone().blob();
   return b.size ? { res: r, size: b.size } : null;
 }
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 async function fetchTileNative(job) {
-  const r = await NP.CapacitorHttp.request({ url: job.url, method: 'GET', responseType: 'blob', connectTimeout: 15000, readTimeout: 20000 });
-  if (r.status !== 200 || !r.data || typeof r.data !== 'string') return 0;
+  let r;
+  try {
+    r = await NP.CapacitorHttp.request({ url: job.url, method: 'GET', responseType: 'blob', connectTimeout: 15000, readTimeout: 20000,
+      headers: { 'User-Agent': UA, 'Accept': 'image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5' } });
+  } catch (e) { dl.err = dl.err || `連線失敗：${e.message || e}`; dl.errUrl = dl.errUrl || job.url; return 0; }
+  const ok = r.status === 200 && typeof r.data === 'string' && /^(iVBOR|\/9j\/|UklGR|R0lGOD)/.test(r.data);
+  if (!ok) {
+    dl.err = dl.err || (r.status !== 200 ? `伺服器回應 HTTP ${r.status}` : '伺服器傳回的不是圖片');
+    dl.errUrl = dl.errUrl || job.url;
+    return 0;
+  }
   await NP.Filesystem.writeFile({ path: 'tiles/' + job.key, data: r.data, directory: 'DATA', recursive: true });
   NT.index.add(job.key);
   return Math.round(r.data.length * 0.75);
@@ -826,7 +852,8 @@ async function finishDownload(area) {
   area.partial = dl.cancel;
   if (area.count > 0) await DB.put('areas', area);
   dl.running = false;
-  toast(dl.cancel ? '已停止下載，已下載的部分已保存' : dl.fail ? `下載完成，${dl.fail} 張失敗（可再下載一次補齊）` : `「${area.name}」下載完成`, 3500);
+  lastDlErr = dl.fail ? { msg: dl.err || '未知原因', url: dl.errUrl || '', fail: dl.fail, total: dl.total } : null;
+  toast(dl.cancel ? '已停止下載，已下載的部分已保存' : dl.fail ? `${dl.fail} 張下載失敗：${dl.err || '未知原因'}` : `「${area.name}」下載完成`, 4500);
   if (sheetName === 'download') renderSheet();
   if (base) base.redraw();
 }
@@ -845,7 +872,7 @@ async function startDownload(area) {
           let r = null;
           for (let tries = 0; tries < 2 && !r; tries++) { try { r = await fetchTile(u); } catch (e) {} if (!r) await new Promise(s => setTimeout(s, 600)); }
           if (r) { await cache.put(u, r.res); if (r.size) dl.bytes += r.size; else dl.unknown++; }
-          else dl.fail++;
+          else { dl.fail++; dl.err = dl.err || '伺服器沒有回應圖片'; dl.errUrl = dl.errUrl || u; }
         } else dl.unknown++;
       } catch (e) { dl.fail++; }
       dl.done++;
@@ -937,6 +964,12 @@ SHEETS.download = {
       ${tooMany ? '<p class="note" style="color:var(--danger)">範圍太大了，請縮小範圍或降低最大縮放等級（上限 60,000 張）。</p>' : ''}
       ${topoLimit ? `<p class="note" style="color:var(--danger)">OpenTopoMap 為公益伺服器，單次請勿超過 ${LAYERS.topo.dlMax.toLocaleString()} 張。</p>` : ''}
       <button class="btn primary block" id="btnDl" style="margin-top:14px" ${!navigator.onLine || !est || !est.tiles || tooMany || topoLimit ? 'disabled' : ''}>${ICON.dl}開始下載</button>`}
+      ${lastDlErr && !dl.running ? `<div class="group" style="margin-top:12px;background:var(--danger-soft)"><div class="row" style="display:block">
+        <div class="t" style="color:var(--danger)">上次有 ${lastDlErr.fail.toLocaleString()} / ${lastDlErr.total.toLocaleString()} 張下載失敗</div>
+        <div class="s">原因：${esc(lastDlErr.msg)}</div>
+        <div class="s" style="word-break:break-all;user-select:text;-webkit-user-select:text">${esc(lastDlErr.url)}</div>
+        <div class="acts"><button class="mini" id="btnCopyErr">複製錯誤資訊</button></div>
+      </div></div>` : ''}
       <div class="section-t">已下載的區域</div>
       ${areas.length ? `<div class="group">${areas.map(a => `
         <div class="row" style="display:block" data-id="${a.id}">
@@ -946,6 +979,7 @@ SHEETS.download = {
         </div>`).join('')}</div>` : '<div class="empty">尚未下載任何地圖</div>'}
       ${usage}`;
 
+    const ce = $('#btnCopyErr'); if (ce) ce.onclick = () => copyText(`${lastDlErr.msg}\n${lastDlErr.url}`);
     if (dl.running) { drawProgress(); $('#btnCancel').onclick = () => { dl.cancel = true; }; }
     else {
       bindSeg('segMode', v => { dlForm.mode = v; if (v === 'route' && !routes.length) { toast('請先匯入 GPX 路線'); dlForm.mode = 'view'; } renderSheet(); });
@@ -996,7 +1030,14 @@ window.addEventListener('online', netState); window.addEventListener('offline', 
 
 /* ---------- 啟動 ---------- */
 (async function init() {
-  if (NATIVE) { document.body.classList.add('native'); await NT.load(); if (NP.LocalNotifications) NP.LocalNotifications.requestPermissions().catch(() => {}); }
+  if (NATIVE) {
+    document.body.classList.add('native'); await NT.load();
+    if (NP.LocalNotifications) NP.LocalNotifications.requestPermissions().catch(() => {});
+    if (NP.App) {
+      NP.App.addListener('appUrlOpen', e => importFromUrl(e && e.url)).catch(() => {});
+      NP.App.getLaunchUrl().then(l => l && importFromUrl(l.url)).catch(() => {});
+    }
+  }
   if (!setLayer(S.layer)) setLayer('rudy');
   netState();
   startGPS();
