@@ -1,0 +1,9 @@
+{
+  "appId": "tw.mingyi2644.offlinemap",
+  "appName": "離線地圖",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#F6F3EC"
+  }
+}
