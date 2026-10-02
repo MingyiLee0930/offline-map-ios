@@ -36,7 +36,8 @@ const askText = (title, value, ok = '確定') => ask(title, `<input type="text" 
   [{ label: ok, value: '__input', cls: 'primary' }, { label: '取消', value: null, cls: 'ghost' }]);
 
 /* ---------- 地圖 ---------- */
-const map = L.map('map', { zoomControl: false, attributionControl: false, minZoom: 3, maxZoom: 19, zoomSnap: 1 })
+const map = L.map('map', { zoomControl: false, attributionControl: false, minZoom: 3, maxZoom: 19, zoomSnap: 1,
+  rotate: true, bearing: 0, rotateControl: false, touchRotate: false, shiftKeyRotate: false, compassBearing: false })
   .setView([S.view[0], S.view[1]], S.view[2]);
 L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
 let base = null;
@@ -66,20 +67,83 @@ const routeLayer = L.layerGroup().addTo(map);   // 導航路線
 const viewLayer = L.layerGroup().addTo(map);    // 檢視中的歷史軌跡 / 區域
 const pinIcon = cls => L.divIcon({ className: '', html: `<div class="pin ${cls}"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
 
-/* ---------- 跟隨模式 ---------- */
-let follow = false;
-const setFollow = v => { follow = v; $('#btnLocate').classList.toggle('on', v); };
-map.on('dragstart', () => follow && setFollow(false));
+/* ---------- 定位模式：off 自由瀏覽／follow 置中（北朝上）／heading 行進方向朝上 ---------- */
+let navMode = 'off', follow = false;
+const LOC_ICON = {
+  off: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>',
+  follow: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="currentColor"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>',
+  heading: '<svg viewBox="0 0 24 24"><path d="M12 3 19 20l-7-4-7 4 7-17Z" fill="currentColor"/></svg>',
+};
+function setMode(m) {
+  navMode = m; follow = m !== 'off';
+  const b = $('#btnLocate');
+  b.innerHTML = LOC_ICON[m];
+  b.classList.toggle('on', m !== 'off');
+  b.setAttribute('aria-label', m === 'heading' ? '行進方向朝上' : m === 'follow' ? '置中（北朝上）' : '定位');
+  if (m === 'follow') setBearingSmooth(0, true);
+  if (m === 'heading') applyHeading(true);
+  updateCompassBtn();
+}
+const setFollow = v => { if (!v) setMode('off'); else if (navMode === 'off') setMode('follow'); };
+map.on('dragstart', () => { if (follow) setMode('off'); });
 $('#btnLocate').onclick = () => {
   requestCompass();
-  setFollow(true);
-  if (fix) map.setView([fix.lat, fix.lon], Math.max(map.getZoom(), 15));
-  else toast('正在取得 GPS 定位…');
+  if (!fix) { setMode('follow'); toast('正在取得 GPS 定位…'); return; }
+  const next = navMode === 'follow' ? 'heading' : 'follow';
+  setMode(next);
+  map.setView([fix.lat, fix.lon], Math.max(map.getZoom(), next === 'heading' ? 16 : 15));
+  toast(next === 'heading' ? '行進方向朝上（再按一次回到北朝上）' : '已置中，北朝上（再按一次切換行進方向朝上）', 1800);
 };
+/* 指北針按鈕：地圖旋轉時出現，點一下回到北朝上 */
+function updateCompassBtn() {
+  const b = $('#btnCompass'), br = map.getBearing ? map.getBearing() : 0;
+  const rotated = Math.abs(((br + 540) % 360) - 180) > 1;
+  b.classList.toggle('hidden', !rotated);
+  const n = b.querySelector('.needle'); if (n) n.style.transform = `rotate(${br}deg)`;
+}
+$('#btnCompass').onclick = () => { if (navMode === 'heading') setMode('follow'); else { setBearingSmooth(0, true); updateCompassBtn(); updateArrow(); } };
+
+/* ---------- 方向：行進中用 GPS 航向，停下時用指南針 ---------- */
+let headingNow = null, lastBearingT = 0;
+const angDiff = (a, b) => ((b - a + 540) % 360) - 180;
+function currentHeading() {
+  if (fix && fix.course != null && fix.course >= 0 && fix.speed != null && fix.speed > 1 && Date.now() - fix.t < 5000) return fix.course;
+  return compassHeading;
+}
+function updateHeading() {
+  const h = currentHeading();
+  if (h == null) return;
+  headingNow = headingNow == null ? h : (headingNow + angDiff(headingNow, h) * 0.35 + 360) % 360;
+  applyHeading(false);
+}
+function setBearingSmooth(b, force) {
+  if (!map.setBearing) return;
+  const cur = map.getBearing();
+  if (!force && Math.abs(angDiff(cur, b)) < 2) return;
+  map.setBearing(b);
+  updateCompassBtn();
+}
+function applyHeading(force) {
+  if (navMode === 'heading' && headingNow != null && document.visibilityState !== 'hidden') {
+    const now = performance.now();
+    if (force || now - lastBearingT > 120) { lastBearingT = now; setBearingSmooth(-headingNow, force); }
+  }
+  updateArrow();
+}
+/* 箭頭在螢幕上的角度 = 行進方向 + 地圖旋轉角度 */
+function updateArrow() {
+  const a = document.querySelector('.me-arrow');
+  if (!a) return;
+  const br = map.getBearing ? map.getBearing() : 0;
+  a.style.transform = `rotate(${((headingNow || 0) + br) % 360}deg)`;
+  a.classList.toggle('nohead', headingNow == null);
+}
+map.on('rotate', updateArrow);
 
 /* ---------- GPS ---------- */
 let fix = null, meMarker = null, accCircle = null;
-const meIcon = L.divIcon({ className: '', html: '<div class="me-wrap"><div class="me-cone"></div><div class="me-dot"></div></div>', iconSize: [22, 22], iconAnchor: [11, 11] });
+const meIcon = L.divIcon({ className: '', iconSize: [44, 44], iconAnchor: [22, 22],
+  html: '<div class="me-arrow nohead"><svg class="me-svg" viewBox="0 0 44 44"><path d="M22 5 35 37 22 30 9 37Z" fill="#2F6FDB" stroke="#fff" stroke-width="3.2" stroke-linejoin="round"/></svg></div>' });
 /* 原生 App：背景定位外掛。bg=true 時鎖定螢幕、切到其他 App 仍持續定位 */
 let gpsWatcher = null, gpsBg = null, permAsked = false;
 async function nativeWatch(bg) {
@@ -129,11 +193,12 @@ function onFix(pos) {
   if (!meMarker) {
     accCircle = L.circle(ll, { radius: fix.acc, color: '#2F6FDB', weight: 1, opacity: .35, fillOpacity: .08, interactive: false }).addTo(map);
     meMarker = L.marker(ll, { icon: meIcon, interactive: false, zIndexOffset: 1000, keyboard: false }).addTo(map);
+    updateArrow();
   } else { meMarker.setLatLng(ll); accCircle.setLatLng(ll).setRadius(fix.acc); }
   if (firstFix) { firstFix = false; if (S.view[2] <= 8) map.setView(ll, 15); }
   const visible = document.visibilityState !== 'hidden';
   if (follow && visible) map.panTo(ll, { animate: true, duration: .5 });
-  if (!compassHeading && fix.course != null && fix.speed > 0.6) setCone(fix.course);
+  updateHeading();
   updateTopbar();
   if (rec.on) recAdd(fix);
   updateNav();
@@ -165,13 +230,11 @@ function onOrient(e) {
   let h = e.webkitCompassHeading;
   if (h == null && e.absolute && e.alpha != null) h = 360 - e.alpha;
   if (h == null) return;
-  compassHeading = h;
-  const now = performance.now(); if (now - orientT < 90) return; orientT = now;
-  setCone(h);
-}
-function setCone(h) {
-  const c = document.querySelector('.me-cone');
-  if (c) { c.classList.add('show'); c.style.transform = `rotate(${h}deg)`; }
+  // 螢幕橫放時修正方向
+  const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  compassHeading = (h + so + 360) % 360;
+  const now = performance.now(); if (now - orientT < 80) return; orientT = now;
+  updateHeading();
 }
 
 /* ---------- 音效 / 語音 / 螢幕常亮 ---------- */
@@ -253,7 +316,7 @@ function startRec(resume) {
   recLine = L.polyline(rec.pts.map(p => [p[0], p[1]]), { color: '#E08A2C', weight: 4.5, opacity: .95, interactive: false }).addTo(map);
   recWptLayer.clearLayers(); rec.wpts.forEach(addWptMarker);
   document.body.classList.add('recording'); $('#startLbl').textContent = '結束';
-  setFollow(true);
+  if (navMode === 'off') setMode('follow');
   if (fix) { map.setView([fix.lat, fix.lon], Math.max(map.getZoom(), 15)); recAdd(fix); }
   if (S.keepAwake) wake(true);
   tw.w1 = tw.w2 = tw.wT = false;
@@ -880,7 +943,7 @@ SHEETS.settings = {
       <div class="group">
         <div class="row"><div class="grow"><div class="t">瀏覽快取</div><div class="s">平常滑動地圖時自動暫存的圖磚</div></div><button class="mini red" id="btnClearSeen">清除</button></div>
       </div>`}
-      <p class="note">版本 2.2（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
+      <p class="note">版本 2.3（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
     bindSeg('segOff', v => { S.offThreshold = +v; saveSettings(); renderSheet(); });
     bindSeg('segAcc', v => { S.minAcc = +v; saveSettings(); renderSheet(); });
     $('#swBeep').onchange = e => { S.beep = e.target.checked; saveSettings(); if (S.beep) { unlockAudio(); beep([880], 0.15); } };
@@ -1224,7 +1287,9 @@ function netState() { $('#netChip').classList.toggle('hidden', navigator.onLine)
 window.addEventListener('online', netState); window.addEventListener('offline', netState);
 
 /* ---------- 啟動 ---------- */
+document.addEventListener('touchend', function once() { requestCompass(); document.removeEventListener('touchend', once); }, { passive: true });
 (async function init() {
+  setMode('off');
   if (NATIVE) {
     document.body.classList.add('native'); await NT.load();
     if (NP.LocalNotifications) NP.LocalNotifications.requestPermissions().catch(() => {});

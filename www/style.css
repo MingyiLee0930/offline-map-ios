@@ -25,7 +25,7 @@
 html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:15px;-webkit-font-smoothing:antialiased;overscroll-behavior:none}
 button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
 input,select{font:inherit;color:inherit}
-svg:not(.leaflet-zoom-animated){width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+svg:where(:not(.leaflet-zoom-animated):not(.me-svg)){width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
 .mono{font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .hidden{display:none!important}
 .glass{background:var(--surface);backdrop-filter:saturate(1.6) blur(18px);-webkit-backdrop-filter:saturate(1.6) blur(18px);box-shadow:var(--shadow)}
@@ -231,3 +231,9 @@ svg.profile{width:100%!important;height:84px!important;display:block;margin-top:
 .time-row .dark b{color:var(--danger)}
 .time-warn{display:block;width:calc(100% - 12px);margin:0 6px 10px;padding:9px 12px;border-radius:12px;background:#FBF1DE;color:#8A5A12;font-size:13px;font-weight:600;line-height:1.45;text-align:left}
 .time-warn.dark{background:var(--danger-soft);color:var(--danger)}
+
+/* 定位箭頭 */
+.me-arrow{width:44px;height:44px;filter:drop-shadow(0 1px 3px rgba(0,0,0,.35))}
+.me-arrow .me-svg{width:44px;height:44px;display:block}
+.me-arrow.nohead .me-svg path{opacity:.85}
+#btnCompass .needle{transition:transform .2s}
