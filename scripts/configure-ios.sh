@@ -3,6 +3,9 @@
 set -euo pipefail
 PL=ios/App/App/Info.plist
 
+# 使用與套件版本一致的 Capacitor 前端程式
+cp node_modules/@capacitor/core/dist/capacitor.js www/vendor/capacitor.js
+
 plutil -replace CFBundleDisplayName -string "離線地圖" "$PL"
 plutil -replace NSLocationWhenInUseUsageDescription -string "用於在地圖上顯示你的位置、導航與記錄登山軌跡。" "$PL"
 plutil -replace NSLocationAlwaysAndWhenInUseUsageDescription -string "鎖定螢幕或切換到其他 App 時，繼續記錄登山軌跡並在偏離路線時提醒你。" "$PL"

@@ -39,8 +39,16 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 /* ---------- 原生 App（Capacitor）偵測 ---------- */
 const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 const NP = {};
-if (NATIVE) for (const n of ['BackgroundGeolocation', 'Filesystem', 'LocalNotifications', 'Share', 'Haptics', 'KeepAwake', 'CapacitorHttp'])
-  NP[n] = window.Capacitor.registerPlugin(n);
+let NATIVE_ERR = '';
+if (NATIVE) {
+  const reg = (window.capacitorExports && window.capacitorExports.registerPlugin) || window.Capacitor.registerPlugin;
+  for (const n of ['BackgroundGeolocation', 'Filesystem', 'LocalNotifications', 'Share', 'Haptics', 'KeepAwake', 'CapacitorHttp']) {
+    try { NP[n] = reg(n); } catch (e) { NATIVE_ERR += n + ' '; }
+  }
+}
+/* 顯示未預期的錯誤，方便除錯 */
+window.addEventListener('error', e => { const t = document.getElementById('toast'); if (t) { t.textContent = '錯誤：' + e.message; t.classList.add('show'); } });
+window.addEventListener('unhandledrejection', e => { const t = document.getElementById('toast'); if (t) { t.textContent = '錯誤：' + (e.reason && e.reason.message || e.reason); t.classList.add('show'); } });
 
 /* ---------- 設定 ---------- */
 const DEFAULTS = {

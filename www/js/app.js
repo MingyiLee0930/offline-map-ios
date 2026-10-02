@@ -106,10 +106,13 @@ async function nativeWatch(bg) {
       onFix({ coords: { latitude: loc.latitude, longitude: loc.longitude, accuracy: loc.accuracy, altitude: loc.altitude,
         altitudeAccuracy: loc.altitudeAccuracy, speed: loc.speed, heading: loc.bearing }, timestamp: loc.time });
     });
-  } catch (e) { $('#coordText').textContent = '定位啟動失敗'; }
+  } catch (e) { $('#coordText').textContent = '定位啟動失敗：' + (e && e.message || e); }
 }
 function startGPS() {
-  if (NATIVE) return nativeWatch(false);
+  if (NATIVE) {
+    if (!NP.BackgroundGeolocation) { $('#coordText').textContent = '定位外掛載入失敗 ' + NATIVE_ERR; return; }
+    return nativeWatch(false);
+  }
   if (!('geolocation' in navigator)) { $('#coordText').textContent = '此裝置不支援定位'; return; }
   navigator.geolocation.watchPosition(onFix, onGpsErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 60000 });
 }
@@ -993,7 +996,7 @@ window.addEventListener('online', netState); window.addEventListener('offline', 
 
 /* ---------- 啟動 ---------- */
 (async function init() {
-  if (NATIVE) { document.body.classList.add('native'); await NT.load(); }
+  if (NATIVE) { document.body.classList.add('native'); await NT.load(); if (NP.LocalNotifications) NP.LocalNotifications.requestPermissions().catch(() => {}); }
   if (!setLayer(S.layer)) setLayer('rudy');
   netState();
   startGPS();
