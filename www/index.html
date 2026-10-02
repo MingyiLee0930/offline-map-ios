@@ -27,7 +27,7 @@
   </button>
   <div class="chip glass alt-chip"><span class="lbl">海拔</span><b id="altText" class="mono">—</b><span class="lbl">m</span></div>
 </header>
-<div id="netChip" class="net-chip hidden">離線模式</div>
+<div class="subchips"><span id="netChip" class="net-chip hidden">離線模式</span><button id="expChip" class="exp-chip hidden"></button></div>
 
 <!-- 偏離路線警示 -->
 <button id="offBanner" class="banner hidden">
@@ -49,6 +49,7 @@
 
 <!-- 導航資訊卡 -->
 <section id="navCard" class="navcard glass hidden">
+  <button id="timeWarn" class="time-warn hidden"></button>
   <div class="stats">
     <div><span class="lbl">時間</span><b id="stTime" class="mono">0:00:00</b></div>
     <div><span class="lbl">距離</span><b id="stDist" class="mono">0.00</b><span class="unit">km</span></div>
@@ -59,6 +60,7 @@
     <div class="route-meta"><span id="rtName" class="rt-name"></span><span id="rtLeft" class="mono"></span></div>
     <div class="progress"><i id="rtBar"></i></div>
   </div>
+  <div id="timeRow" class="time-row hidden"></div>
 </section>
 
 <!-- 底部工具列 -->
@@ -98,6 +100,7 @@
 </div>
 
 <input type="file" id="gpxInput" multiple hidden>
+<input type="file" id="restoreInput" hidden>
 <div id="toast" class="toast"></div>
 
 <script src="vendor/capacitor.js"></script>

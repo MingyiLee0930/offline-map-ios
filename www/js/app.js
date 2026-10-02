@@ -256,6 +256,7 @@ function startRec(resume) {
   setFollow(true);
   if (fix) { map.setView([fix.lat, fix.lon], Math.max(map.getZoom(), 15)); recAdd(fix); }
   if (S.keepAwake) wake(true);
+  tw.w1 = tw.w2 = tw.wT = false;
   clearInterval(recTimer); recTimer = setInterval(tick, 1000); tick();
   persistRec(); updateNav();
   toast(resume ? '已繼續記錄' : fix ? '開始導航，正在記錄軌跡' : '開始記錄，等待 GPS 定位…');
@@ -287,8 +288,10 @@ async function finishRec(src) {
 }
 $('#btnStart').onclick = () => rec.on ? stopRec() : startRec();
 
+let tickN = 0;
 function tick() {
   if (!rec.on) return;
+  if (++tickN % 15 === 0) updateNav();
   const el = fmtDur(Date.now() - rec.start);
   $('#stTime').textContent = el;
   $('#stDist').textContent = fmtKm(rec.dist);
@@ -361,6 +364,98 @@ function navInfo() {
   const upDone = P.cumUp[n.i] + n.t * ((P.cumUp[n.i + 1] ?? P.cumUp[n.i]) - P.cumUp[n.i]);
   return { ...n, left: Math.max(0, P.length - n.along), upLeft: Math.max(0, P.up - upDone), frac: P.length ? n.along / P.length : 0 };
 }
+
+/* ---------- 時間規劃：預估到達、日落、折返 ---------- */
+/* 個人速度係數：走了 1 km 之後，用今天的實際速度修正標準時間 */
+function paceFactor() {
+  if (!rec.on || rec.dist < 1000) return 1;
+  const s = stdTime(rec.dist, rec.up);
+  return s > 0 ? Math.min(3, Math.max(0.4, (Date.now() - rec.start) / s)) : 1;
+}
+/* 折返點：手動指定的航點優先；原路來回／環狀路線自動取最高點 */
+function turnInfo() {
+  if (!route || route.pts.length < 2) return null;
+  const pts = route.pts, P = route.prep;
+  let idx = null, name = '', auto = false;
+  if (route.turn) {
+    idx = nearestOnRoute([route.turn.lat, route.turn.lon], pts, P.cum).i;
+    name = route.turn.name;
+  } else if (dist(pts[0], pts[pts.length - 1]) < 300) {
+    auto = true;
+    let best = -Infinity;
+    pts.forEach((p, i) => { if (p[2] != null && p[2] > best) { best = p[2]; idx = i; } });
+    if (idx != null) name = `最高點 ${Math.round(best)} m`;
+    else {
+      let far = -1;
+      pts.forEach((p, i) => { const d = dist(pts[0], p); if (d > far) { far = d; idx = i; } });
+      name = '最遠點';
+    }
+  }
+  if (idx == null) return null;
+  return { idx, name, auto, along: P.cum[idx], back: stdTime(P.length - P.cum[idx], P.up - P.cumUp[idx]) };
+}
+function timeInfo() {
+  const ll = fix ? [fix.lat, fix.lon] : route && route.pts.length ? route.pts[0] : null;
+  if (!ll) return null;
+  const sun = sunTimes(new Date(), ll[0], ll[1]);
+  const f = paceFactor(), n = navInfo();
+  const out = { sun, f, eta: null, need: null, turn: null, turnAt: null };
+  if (route && route.pts.length > 1) {
+    if (n) { out.need = stdTime(n.left, n.upLeft) * f; if (rec.on) out.eta = Date.now() + out.need; }
+    else out.need = stdTime(route.prep.length, route.prep.up);
+    const t = turnInfo();
+    if (t && sun.set) {
+      const passed = n && rec.on && n.along >= t.along - 50;
+      if (!passed) { out.turn = t; out.turnAt = sun.set - 30 * 60e3 - t.back * f; }
+    }
+  }
+  return out;
+}
+const tw = { w1: false, w2: false, wT: false };
+function timeAlert(msg) {
+  if (NATIVE && document.visibilityState === 'hidden') { notify('時間提醒', msg); return; }
+  if (S.beep) beep([784, 659, 784], 0.18, 0.08);
+  haptic();
+  setTimeout(() => speak(msg), 700);
+}
+function updateTimeRow() {
+  const row = $('#timeRow'), warn = $('#timeWarn');
+  const ti = timeInfo();
+  if (!ti || (!rec.on && !route)) { row.classList.add('hidden'); warn.classList.add('hidden'); return; }
+  const set = ti.sun.set, parts = [];
+  if (route && ti.need != null) {
+    if (ti.eta) {
+      const cls = set && ti.eta > set ? 'dark' : set && ti.eta > set - 30 * 60e3 ? 'late' : '';
+      parts.push(`<span class="${cls}">預估到達 <b>${hhmm(ti.eta)}</b></span>`);
+    } else parts.push(`<span>約需 <b>${fmtHM(ti.need)}</b></span>`);
+  }
+  if (set) parts.push(`<span>日落 <b>${hhmm(set)}</b>${!route && rec.on ? `（剩 ${fmtHM(set - Date.now())}）` : ''}</span>`);
+  if (ti.turnAt) parts.push(`<span class="${Date.now() > ti.turnAt ? 'dark' : ''}">最晚折返 <b>${hhmm(ti.turnAt)}</b></span>`);
+  row.innerHTML = parts.join('');
+  row.classList.toggle('hidden', !parts.length);
+
+  // 警示（只在記錄中）
+  let msg = '', level = '';
+  if (rec.on && set) {
+    const now = Date.now();
+    if (ti.turnAt) {
+      if (now > ti.turnAt) { if (!tw.wT) { tw.wT = true; timeAlert(`已超過最晚折返時間 ${hhmm(ti.turnAt)}，建議現在折返`); } }
+      else if (now < ti.turnAt - 10 * 60e3) tw.wT = false;
+      if (now > ti.turnAt) { msg = `已超過最晚折返時間 ${hhmm(ti.turnAt)}（折返點：${ti.turn.name}），建議現在往回走`; level = 'dark'; }
+    }
+    if (ti.eta) {
+      const e1 = set - 30 * 60e3;
+      if (ti.eta > set) { if (!tw.w2) { tw.w2 = true; tw.w1 = true; timeAlert(`預計 ${hhmm(ti.eta)} 到達，晚於日落 ${hhmm(set)}，請考慮折返或準備頭燈`); } }
+      else if (ti.eta < set - 10 * 60e3) tw.w2 = false;
+      if (ti.eta > e1) { if (!tw.w1) { tw.w1 = true; timeAlert(`依目前速度，預計 ${hhmm(ti.eta)} 到達，接近日落 ${hhmm(set)}`); } }
+      else if (ti.eta < e1 - 10 * 60e3) tw.w1 = false;
+      if (!msg && ti.eta > set) { msg = `依目前速度約 ${hhmm(ti.eta)} 到達，晚於日落 ${hhmm(set)}。請加快腳步、考慮折返，或準備頭燈。`; level = 'dark'; }
+      else if (!msg && ti.eta > e1) { msg = `依目前速度約 ${hhmm(ti.eta)} 到達，距日落（${hhmm(set)}）不到 30 分鐘。`; level = 'late'; }
+    }
+  }
+  warn.textContent = msg;
+  warn.className = 'time-warn ' + level + (msg ? '' : ' hidden');
+}
 function updateNav() {
   const show = rec.on || !!route;
   $('#navCard').classList.toggle('hidden', !show);
@@ -378,6 +473,7 @@ function updateNav() {
       $('#rtBar').style.width = '0%';
     }
   }
+  updateTimeRow();
   const c = $('#navCard');
   document.body.classList.toggle('has-nav', show);
   document.body.style.setProperty('--nav-h', show ? (c.offsetHeight + 8) + 'px' : '0px');
@@ -625,6 +721,11 @@ async function importFromUrl(url) {
   const name = decodeURIComponent(url.split('/').pop() || 'route.gpx');
   try {
     const r = await NP.Filesystem.readFile({ path: url, encoding: 'utf8' });
+    if (/\.json$/i.test(name)) {
+      await doRestore(typeof r.data === 'string' ? r.data : await r.data.text());
+      NP.Filesystem.deleteFile({ path: url }).catch(() => {});
+      return;
+    }
     const route = await saveGpxRoute(typeof r.data === 'string' ? r.data : await r.data.text(), name);
     NP.Filesystem.deleteFile({ path: url }).catch(() => {});
     afterImport([route]);
@@ -641,6 +742,10 @@ SHEETS.routes = {
         <div class="t" style="color:var(--route)">${esc(route.name)}</div>
         <div class="s">全長 ${fmtKm(route.prep.length)} km · 爬升 ${Math.round(route.prep.up)} m · 下降 ${Math.round(route.prep.down)} m${n ? ` · 距路線 ${Math.round(n.d)} m` : ''}</div>
         ${profileSVG(route.pts, route.prep.cum, n ? n.along : null)}
+        ${(() => { const ti = timeInfo(), t = turnInfo(); return `
+        <div class="s" style="margin-top:10px">標準時間約 ${fmtHM(stdTime(route.prep.length, route.prep.up))}${ti && ti.sun.set ? ` · 今天日落 ${hhmm(ti.sun.set)}` : ''}</div>
+        <div class="s">折返點：${t ? `${esc(t.name)}${t.auto ? '（自動）' : ''}${ti && ti.turnAt ? ` · 最晚 ${hhmm(ti.turnAt)} 要折返` : ''}` : '單向路線，不需折返'}</div>
+        <div class="acts"><button class="mini" id="btnTurn">設定折返點</button></div>`; })()}
       </div></div>` : ''}
       <div class="section-t">我的路線</div>
       ${list.length ? `<div class="group">${list.map(r => `
@@ -657,6 +762,7 @@ SHEETS.routes = {
         </div>`).join('')}</div>` : `<div class="empty">還沒有路線<br>匯入山友或官方提供的 GPX 檔，就能在地圖上跟著藍色路線走。</div>`}
       <p class="note">從 iPhone「檔案」App、LINE 或 Email 收到的 GPX 檔，都可以透過上方按鈕匯入。設為導航路線後，按下「開始」即會在偏離 ${S.offThreshold} m 時發出警示。</p>`;
     $('#btnImport').onclick = () => $('#gpxInput').click();
+    const bt = $('#btnTurn'); if (bt) bt.onclick = chooseTurn;
     $$('[data-a]', el).forEach(b => b.onclick = async () => {
       const id = b.closest('[data-id]').dataset.id, a = b.dataset.a;
       const r = list.find(x => x.id === id);
@@ -760,13 +866,21 @@ SHEETS.settings = {
         <label class="row"><div class="t">我的名字</div><input type="text" id="inName" placeholder="簡訊署名" value="${esc(S.myName)}"></label>
         <label class="row"><div class="t">留守人電話</div><input type="tel" id="inContact" placeholder="可用逗號分隔多人" value="${esc(S.contact)}"></label>
       </div>
+      <div class="section-t">備份與還原</div>
+      <div class="group">
+        <div class="row"><div class="grow"><div class="t">一鍵備份</div><div class="s">${S.lastBackup ? '上次備份：' + fmtDate(S.lastBackup) : '尚未備份過'}</div></div><button class="mini" id="btnBackup">備份</button></div>
+        <div class="row"><div class="grow"><div class="t">從備份還原</div><div class="s">已存在的路線與軌跡不會重複</div></div><button class="mini" id="btnRestore">還原</button></div>
+      </div>
+      <p class="note">備份包含路線、軌跡、航點與設定（不含離線地圖）。建議存到「檔案」App 的 iCloud 雲碟。</p>
+      ${NATIVE ? `<div class="section-t">App 簽署</div>
+      <div class="group"><div class="row"><div class="grow"><div class="t">到期時間</div><div class="s">${provExp ? fmtDate(provExp) : '無法讀取'}</div></div></div></div>` : ''}
       <div class="section-t">自訂圖層</div>
       <div class="group"><label class="row"><input type="url" id="inCustom" style="text-align:left" placeholder="https://…/{z}/{x}/{y}.png" value="${esc(S.customUrl)}"></label></div>
       ${NATIVE ? '' : `<div class="section-t">儲存空間</div>
       <div class="group">
         <div class="row"><div class="grow"><div class="t">瀏覽快取</div><div class="s">平常滑動地圖時自動暫存的圖磚</div></div><button class="mini red" id="btnClearSeen">清除</button></div>
       </div>`}
-      <p class="note">版本 2.0（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
+      <p class="note">版本 2.2（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
     bindSeg('segOff', v => { S.offThreshold = +v; saveSettings(); renderSheet(); });
     bindSeg('segAcc', v => { S.minAcc = +v; saveSettings(); renderSheet(); });
     $('#swBeep').onchange = e => { S.beep = e.target.checked; saveSettings(); if (S.beep) { unlockAudio(); beep([880], 0.15); } };
@@ -775,6 +889,8 @@ SHEETS.settings = {
     $('#inName').onchange = e => { S.myName = e.target.value.trim(); saveSettings(); };
     $('#inContact').onchange = e => { S.contact = e.target.value.trim(); saveSettings(); };
     $('#inCustom').onchange = e => { S.customUrl = e.target.value.trim(); saveSettings(); if (S.layer === 'custom') setLayer('custom'); };
+    $('#btnBackup').onclick = makeBackup;
+    $('#btnRestore').onclick = () => $('#restoreInput').click();
     if ($('#btnClearSeen')) $('#btnClearSeen').onclick = async () => { await caches.delete('tiles-seen'); toast('已清除瀏覽快取'); };
   },
 };
@@ -1024,6 +1140,85 @@ SHEETS.download = {
 };
 map.on('moveend', () => { if (sheetName === 'download' && !dl.running && dlForm.mode === 'view') renderSheet(); });
 
+
+/* ---------- 折返點設定 ---------- */
+async function chooseTurn() {
+  if (!route) return;
+  const w = (route.wpts || []).slice(0, 15);
+  const btns = [{ label: '自動（原路來回取最高點）', value: '__auto', cls: 'primary' }]
+    .concat(w.map((x, i) => ({ label: x.name + (x.ele != null ? `（${Math.round(x.ele)} m）` : ''), value: String(i) })))
+    .concat([{ label: '取消', value: null, cls: 'ghost' }]);
+  const v = await ask('設定折返點', w.length ? '選一個航點當折返點，App 會依它計算最晚折返時間。' : '這條路線沒有航點，只能使用自動判斷。', btns);
+  if (v === null) return;
+  route.turn = v === '__auto' ? null : { lat: w[+v].lat, lon: w[+v].lon, name: w[+v].name };
+  const { prep, ...rec2 } = route;
+  await DB.put('routes', rec2);
+  toast('已更新折返點'); updateNav(); renderSheet();
+}
+
+/* ---------- App 簽署到期提醒 ---------- */
+let provExp = null;
+async function loadExpiry() {
+  try {
+    const r = await NP.Filesystem.readFile({ path: 'provision-expiry.txt', directory: 'LIBRARY', encoding: 'utf8' });
+    const t = Date.parse(String(r.data).trim());
+    if (!isNaN(t)) provExp = t;
+  } catch (e) {}
+  renderExpiry();
+  scheduleExpiryNotify();
+}
+function renderExpiry() {
+  const el = $('#expChip');
+  if (!provExp) { el.classList.add('hidden'); return; }
+  const ms = provExp - Date.now(), days = ms / 864e5;
+  el.classList.remove('hidden');
+  el.classList.toggle('warn', days <= 2);
+  el.textContent = ms <= 0 ? 'App 已到期' : days < 1 ? `App 今天 ${hhmm(provExp)} 到期` : `App 剩 ${Math.floor(days)} 天`;
+}
+$('#expChip').onclick = () => ask('App 簽署到期', `到期時間：<b>${provExp ? fmtDate(provExp) : '未知'}</b><br>到期後 App 會打不開，但資料不會消失。請在到期前把 iPhone 接上電腦，用 Sideloadly 重新安裝同一個 ipa。<br><br>上山前一天記得先確認剩餘天數。`,
+  [{ label: '知道了', value: 1, cls: 'primary' }]);
+async function scheduleExpiryNotify() {
+  if (!provExp || !NP.LocalNotifications) return;
+  try { await NP.LocalNotifications.cancel({ notifications: [{ id: 9001 }, { id: 9002 }] }); } catch (e) {}
+  const list = [], now = Date.now();
+  const d1 = new Date(provExp - 864e5); d1.setHours(8, 0, 0, 0);
+  if (d1.getTime() > now) list.push({ id: 9001, title: '離線地圖明天到期', body: `到期時間 ${fmtDate(provExp)}，請接上電腦用 Sideloadly 重新安裝。`, schedule: { at: d1 } });
+  const d2 = new Date(provExp - 3 * 3600e3);
+  if (d2.getTime() > now) list.push({ id: 9002, title: '離線地圖 3 小時後到期', body: '請盡快重新安裝，到期後 App 會打不開。', schedule: { at: d2 } });
+  if (list.length) NP.LocalNotifications.schedule({ notifications: list }).catch(() => {});
+}
+
+/* ---------- 一鍵備份與還原 ---------- */
+async function makeBackup() {
+  try {
+    const data = { app: 'offline-map', kind: 'backup', version: 1, created: Date.now(),
+      settings: { ...S }, routes: await DB.all('routes'), tracks: await DB.all('tracks') };
+    const d = new Date();
+    const name = `離線地圖備份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
+    await shareFile(name, JSON.stringify(data), 'application/json');
+    S.lastBackup = Date.now(); saveSettings();
+    if (sheetName === 'settings') renderSheet();
+  } catch (e) { toast('備份失敗：' + (e.message || e)); }
+}
+async function doRestore(text) {
+  let d;
+  try { d = JSON.parse(text); } catch (e) { throw new Error('檔案格式錯誤'); }
+  if (!d || d.app !== 'offline-map' || d.kind !== 'backup') throw new Error('這不是離線地圖的備份檔');
+  const exR = new Set((await DB.all('routes')).map(r => r.id)), exT = new Set((await DB.all('tracks')).map(t => t.id));
+  let nr = 0, nt = 0;
+  for (const r of d.routes || []) if (r && r.id && !exR.has(r.id)) { await DB.put('routes', r); nr++; }
+  for (const t of d.tracks || []) if (t && t.id && !exT.has(t.id)) { await DB.put('tracks', t); nt++; }
+  for (const k of ['contact', 'myName', 'customUrl']) if (!S[k] && d.settings && d.settings[k]) S[k] = d.settings[k];
+  saveSettings();
+  await ask('還原完成', `新增 ${nr} 條路線、${nt} 筆軌跡。${nr + nt === 0 ? '<br>（備份裡的資料都已經在 App 中）' : ''}`, [{ label: '好', value: 1, cls: 'primary' }]);
+  if (sheetName) renderSheet();
+}
+$('#restoreInput').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try { await doRestore(await f.text()); } catch (err) { toast('還原失敗：' + err.message, 4000); }
+};
+
 /* ---------- 網路狀態 ---------- */
 function netState() { $('#netChip').classList.toggle('hidden', navigator.onLine); }
 window.addEventListener('online', netState); window.addEventListener('offline', netState);
@@ -1033,6 +1228,7 @@ window.addEventListener('online', netState); window.addEventListener('offline', 
   if (NATIVE) {
     document.body.classList.add('native'); await NT.load();
     if (NP.LocalNotifications) NP.LocalNotifications.requestPermissions().catch(() => {});
+    loadExpiry(); setInterval(renderExpiry, 60000);
     if (NP.App) {
       NP.App.addListener('appUrlOpen', e => importFromUrl(e && e.url)).catch(() => {});
       NP.App.getLaunchUrl().then(l => l && importFromUrl(l.url)).catch(() => {});

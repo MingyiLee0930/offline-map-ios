@@ -295,3 +295,31 @@ function toGPX(name, pts, wpts = []) {
   for (const p of pts) s += `<trkpt lat="${p[0].toFixed(7)}" lon="${p[1].toFixed(7)}">${p[2] != null ? `<ele>${p[2].toFixed(1)}</ele>` : ''}${p[3] ? `<time>${new Date(p[3]).toISOString()}</time>` : ''}</trkpt>\n`;
   return s + '</trkseg></trk>\n</gpx>\n';
 }
+
+/* ---------- 時間規劃：日落、標準行程時間 ---------- */
+/* 日出日落（SunCalc 演算法，離線計算），回傳 {rise, set} 毫秒時間戳 */
+function sunTimes(date, lat, lon) {
+  const dayMs = 864e5, J1970 = 2440588, J2000 = 2451545, e = RAD * 23.4397, J0 = 0.0009;
+  const noon = new Date(date); noon.setHours(12, 0, 0, 0);
+  const d = noon.valueOf() / dayMs - 0.5 + J1970 - J2000;
+  const lw = RAD * -lon, phi = RAD * lat;
+  const n = Math.round(d - J0 - lw / (2 * Math.PI));
+  const approx = (Ht) => J0 + (Ht + lw) / (2 * Math.PI) + n;
+  const ds = approx(0);
+  const M = RAD * (357.5291 + 0.98560028 * ds);
+  const C = RAD * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 0.0003 * Math.sin(3 * M));
+  const Lm = M + C + RAD * 102.9372 + Math.PI;
+  const dec = Math.asin(Math.sin(e) * Math.sin(Lm));
+  const transit = (a) => J2000 + a + 0.0053 * Math.sin(M) - 0.0069 * Math.sin(2 * Lm);
+  const Jnoon = transit(ds);
+  const cosW = (Math.sin(-0.833 * RAD) - Math.sin(phi) * Math.sin(dec)) / (Math.cos(phi) * Math.cos(dec));
+  if (cosW < -1 || cosW > 1) return { rise: null, set: null };
+  const Jset = transit(approx(Math.acos(cosW)));
+  const Jrise = Jnoon - (Jset - Jnoon);
+  const toMs = j => (j + 0.5 - J1970) * dayMs;
+  return { rise: toMs(Jrise), set: toMs(Jset) };
+}
+/* 標準行程時間（毫秒）：平路每小時 4 km，每爬升 100 m 加 10 分鐘 */
+const stdTime = (meters, up) => (meters / 4000 + Math.max(0, up) / 600) * 3600e3;
+const hhmm = t => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const fmtHM = ms => { const m = Math.max(0, Math.round(ms / 60000)); return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`; };

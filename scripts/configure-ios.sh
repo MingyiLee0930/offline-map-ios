@@ -18,7 +18,7 @@ plutil -replace LSSupportsOpeningDocumentsInPlace -bool NO "$PL"
 
 # 讓 iPhone 的「分享 / 以其他 App 開啟」清單出現「離線地圖」（GPX 檔）
 plutil -replace UTImportedTypeDeclarations -json '[{"UTTypeIdentifier":"com.topografix.gpx","UTTypeDescription":"GPS Exchange Format","UTTypeConformsTo":["public.xml","public.data"],"UTTypeTagSpecification":{"public.filename-extension":["gpx","GPX"],"public.mime-type":["application/gpx+xml","application/gpx"]}}]' "$PL"
-plutil -replace CFBundleDocumentTypes -json '[{"CFBundleTypeName":"GPX 路線","CFBundleTypeRole":"Viewer","LSHandlerRank":"Alternate","LSItemContentTypes":["com.topografix.gpx","public.xml"]}]' "$PL"
+plutil -replace CFBundleDocumentTypes -json '[{"CFBundleTypeName":"GPX 路線","CFBundleTypeRole":"Viewer","LSHandlerRank":"Alternate","LSItemContentTypes":["com.topografix.gpx","public.xml"]},{"CFBundleTypeName":"離線地圖備份","CFBundleTypeRole":"Viewer","LSHandlerRank":"Alternate","LSItemContentTypes":["public.json"]}]' "$PL"
 plutil -replace UISupportedInterfaceOrientations -json '["UIInterfaceOrientationPortrait"]' "$PL"
 plutil -lint "$PL"
 
@@ -26,4 +26,5 @@ ICON_DIR=ios/App/App/Assets.xcassets/AppIcon.appiconset
 for f in "$ICON_DIR"/*.png; do cp resources/icon-1024.png "$f"; done
 SPLASH_DIR=ios/App/App/Assets.xcassets/Splash.imageset
 for f in "$SPLASH_DIR"/*.png; do cp resources/splash-2732.png "$f"; done
+python3 scripts/patch_appdelegate.py
 echo "iOS 專案設定完成"
