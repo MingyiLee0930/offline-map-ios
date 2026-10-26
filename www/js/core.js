@@ -166,8 +166,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 
 /* ---------- 圖層 ---------- */
 const LAYERS = {
-  rudy: { name: '魯地圖', desc: '台灣登山首選，含等高線、步道、山屋', url: 'https://tile.happyman.idv.tw/map/rudy/{z}/{x}/{y}.png',
-    maxNative: 17, kb: 28, dl: true, attr: '魯地圖 Rudy Map © OSM contributors', sw: 'linear-gradient(135deg,#e9efd9,#c9dcb3 45%,#f3e6c8)' },
+  rudy: { name: '魯地圖', desc: '台灣登山首選，含等高線、步道、山屋', url: 'https://tiles.rudymap.tw/latest/{z}/{x}/{y}.png',
+    tilejson: 'https://tiles.rudymap.tw/tilejson', maxNative: 18, kb: 30, dl: true, attr: '魯地圖 Rudy Map © OSM contributors', sw: 'linear-gradient(135deg,#e9efd9,#c9dcb3 45%,#f3e6c8)' },
   moi: { name: '魯地圖 清爽版', desc: '等高線清晰、配色淡雅', url: 'https://tile.happyman.idv.tw/map/moi_osm/{z}/{x}/{y}.png',
     maxNative: 17, kb: 24, dl: true, attr: 'MOI.OSM © happyman / OSM contributors', sw: 'linear-gradient(135deg,#f4f1ea,#e2e6dc 50%,#d6dfd0)' },
   emap: { name: '台灣通用電子地圖', desc: '國土測繪中心，含 20m 等高線', url: 'https://wmts.nlsc.gov.tw/wmts/EMAP/default/GoogleMapsCompatible/{z}/{y}/{x}',
@@ -182,6 +182,20 @@ const LAYERS = {
     maxNative: 19, kb: 20, dl: false, attr: '© OpenStreetMap contributors', sw: 'linear-gradient(135deg,#f2efe9,#e0dfd5 50%,#aad3df)' },
   custom: { name: '自訂圖層', desc: '在設定中填入圖磚網址', url: '', maxNative: 18, kb: 30, dl: true, attr: '', sw: 'repeating-linear-gradient(45deg,#eee,#eee 6px,#f8f8f8 6px,#f8f8f8 12px)' },
 };
+/* 有 tilejson 的圖層（魯地圖）：連網時取得最新版網址；取不到就用 latest */
+async function refreshLayerUrls() {
+  for (const [key, L] of Object.entries(LAYERS)) {
+    if (!L.tilejson) continue;
+    try {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
+      const j = await (await fetch(L.tilejson, { cache: 'no-store', signal: ctl.signal })).json(); clearTimeout(t);
+      const tpl = j && j.tiles && j.tiles[0];
+      if (typeof tpl === 'string' && /^https:\/\/.+\{z\}.+\{x\}.+\{y\}/.test(tpl)) {
+        L.url = tpl; if (j.maxzoom) L.maxNative = Math.min(18, j.maxzoom);
+      }
+    } catch (e) {}
+  }
+}
 function layerDef(key) {
   const L = LAYERS[key] || LAYERS.rudy;
   if (key === 'custom') L.url = S.customUrl;

@@ -943,7 +943,7 @@ SHEETS.settings = {
       <div class="group">
         <div class="row"><div class="grow"><div class="t">瀏覽快取</div><div class="s">平常滑動地圖時自動暫存的圖磚</div></div><button class="mini red" id="btnClearSeen">清除</button></div>
       </div>`}
-      <p class="note">版本 2.3（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
+      <p class="note">版本 2.4（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
     bindSeg('segOff', v => { S.offThreshold = +v; saveSettings(); renderSheet(); });
     bindSeg('segAcc', v => { S.minAcc = +v; saveSettings(); renderSheet(); });
     $('#swBeep').onchange = e => { S.beep = e.target.checked; saveSettings(); if (S.beep) { unlockAudio(); beep([880], 0.15); } };
@@ -1300,6 +1300,7 @@ document.addEventListener('touchend', function once() { requestCompass(); docume
     }
   }
   if (!setLayer(S.layer)) setLayer('rudy');
+  refreshLayerUrls().then(() => { if (LAYERS[S.layer]?.tilejson) setLayer(S.layer); });
   netState();
   startGPS();
   if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
