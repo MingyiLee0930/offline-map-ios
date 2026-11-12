@@ -11,6 +11,9 @@ plutil -replace NSLocationWhenInUseUsageDescription -string "用於在地圖上�
 plutil -replace NSLocationAlwaysAndWhenInUseUsageDescription -string "鎖定螢幕或切換到其他 App 時，繼續記錄登山軌跡並在偏離路線時提醒你。" "$PL"
 plutil -replace NSLocationAlwaysUsageDescription -string "鎖定螢幕時繼續記錄登山軌跡。" "$PL"
 plutil -replace UIBackgroundModes -json '["location"]' "$PL"
+# 分享圖卡／3D 影片時選「儲存到照片」需要這兩項說明，缺少會讓 App 被系統關閉
+plutil -replace NSPhotoLibraryAddUsageDescription -string "把年度回顧圖卡與 3D 重播影片存到照片。" "$PL"
+plutil -replace NSPhotoLibraryUsageDescription -string "把年度回顧圖卡與 3D 重播影片存到照片。" "$PL"
 plutil -replace LSApplicationQueriesSchemes -json '["sms","tel"]' "$PL"
 plutil -replace ITSAppUsesNonExemptEncryption -bool NO "$PL"
 plutil -replace UIFileSharingEnabled -bool YES "$PL"

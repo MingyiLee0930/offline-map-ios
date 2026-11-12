@@ -16,7 +16,9 @@ function toast(msg, ms = 2400) {
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), ms);
 }
 function ask(title, msg, buttons) {
+  if (ask._res) { const r0 = ask._res; ask._res = null; r0(null); }   // 新對話框蓋過舊的：舊的視為取消，不會卡住
   return new Promise(res => {
+    ask._res = res;
     $('#dlgTitle').textContent = title; $('#dlgMsg').innerHTML = msg;
     const a = $('#dlgActions'); a.innerHTML = '';
     for (const b of buttons) {
@@ -25,6 +27,7 @@ function ask(title, msg, buttons) {
       el.onclick = () => {
         const inp = $('#dlgMsg input');
         $('#dialog').classList.add('hidden');
+        if (ask._res === res) ask._res = null;
         res(b.value === '__input' ? (inp ? inp.value.trim() : '') : b.value);
       };
       a.appendChild(el);
@@ -203,6 +206,7 @@ function onFix(pos) {
   if (rec.on) recAdd(fix);
   updateNav();
   if (sheetName === 'sos') renderSheet();
+  safe('fixHook', () => fixHook());
 }
 function updateTopbar() {
   if (!fix) return;
@@ -300,7 +304,16 @@ function recAdd(f) {
 }
 let persistT = null;
 function persistSoon() { if (!persistT) persistT = setTimeout(() => { persistT = null; persistRec(); }, 8000); }
-function persistRec() { if (!rec.on) return; const { on, ...data } = rec; DB.kvSet('current', data).catch(() => {}); }
+let persistWarned = false;
+function persistRec() {
+  if (!rec.on) return;
+  const { on, ...data } = rec;
+  DB.kvSet('current', data).catch(e => {
+    logErr('persist', e);
+    try { localStorage.setItem('offmap-current', JSON.stringify(data)); } catch (e2) {}
+    if (!persistWarned) { persistWarned = true; toast('暫存軌跡時遇到問題，記錄仍持續進行', 3000); }
+  });
+}
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') persistRec();
   else if (rec.on && S.keepAwake) wake(true);
@@ -311,7 +324,8 @@ function startRec(resume) {
   unlockAudio(); requestCompass();
   if (NATIVE) { nativeWatch(true); NP.LocalNotifications.requestPermissions().catch(() => {}); }
   rec = resume ? Object.assign({ on: true }, resume)
-    : { on: true, id: uid(), start: Date.now(), pts: [], wpts: [], dist: 0, up: 0, down: 0, ref: null, maxE: null, minE: null };
+    : { on: true, id: uid(), start: Date.now(), pts: [], wpts: [], sig: [], dist: 0, up: 0, down: 0, ref: null, maxE: null, minE: null };
+  if (!rec.sig) rec.sig = [];
   if (recLine) map.removeLayer(recLine);
   recLine = L.polyline(rec.pts.map(p => [p[0], p[1]]), { color: '#E08A2C', weight: 4.5, opacity: .95, interactive: false }).addTo(map);
   recWptLayer.clearLayers(); rec.wpts.forEach(addWptMarker);
@@ -322,6 +336,7 @@ function startRec(resume) {
   tw.w1 = tw.w2 = tw.wT = false;
   clearInterval(recTimer); recTimer = setInterval(tick, 1000); tick();
   persistRec(); updateNav();
+  safe('recStartHook', () => recStartHook(!!resume));
   toast(resume ? '已繼續記錄' : fix ? '開始導航，正在記錄軌跡' : '開始記錄，等待 GPS 定位…');
 }
 async function stopRec() {
@@ -331,22 +346,41 @@ async function stopRec() {
 }
 async function finishRec(src) {
   const r = src || rec;
-  clearInterval(recTimer);
   const t = { id: r.id, name: (route ? route.name + ' ' : '') + fmtDate(r.start).split(' ')[0] + ' 軌跡',
     start: r.start, end: src && r.pts.length ? r.pts[r.pts.length - 1][3] : Date.now(),
-    pts: r.pts, wpts: r.wpts, dist: r.dist, up: r.up, down: r.down, maxE: r.maxE, minE: r.minE };
+    pts: r.pts, wpts: r.wpts, sig: r.sig || [], dist: r.dist, up: r.up, down: r.down, maxE: r.maxE, minE: r.minE };
+  t.mov = safe('moving', () => Math.min(movingTime(t.pts), Math.max(0, t.end - t.start)));
+  const keep = t.pts.length >= 2 || t.wpts.length;
+  // 先把軌跡確實寫進手機，成功之後才清掉記錄狀態，避免任何情況下遺失
+  if (keep) {
+    let saved = false;
+    for (let k = 0; k < 3 && !saved; k++) {
+      try { await DB.put('tracks', t); saved = true; }
+      catch (e) { logErr('saveTrack', e); await new Promise(z => setTimeout(z, 500)); }
+    }
+    if (!saved) {
+      try { localStorage.setItem('offmap-unsaved-' + t.id, JSON.stringify(t)); saved = 'ls'; } catch (e) { logErr('saveTrackLS', e); }
+      if (!saved) {
+        await ask('暫時無法儲存', '軌跡暫時寫不進手機，資料沒有遺失，記錄仍在進行中。<br>請稍後再按一次「結束」；如果一直失敗，關掉 App 再打開，會自動接續這次記錄。', [{ label: '知道了', value: 1, cls: 'primary' }]);
+        return;
+      }
+      toast('已先把軌跡存在備用位置，下次開啟 App 會自動補存', 4000);
+    }
+  }
+  clearInterval(recTimer);
   rec = { on: false };
   document.body.classList.remove('recording'); $('#startLbl').textContent = '開始';
   wake(false); clearOff();
   if (NATIVE) nativeWatch(false);
   if (recLine) { map.removeLayer(recLine); recLine = null; }
   recWptLayer.clearLayers();
-  await DB.kvDel('current');
-  updateNav();
-  if (t.pts.length >= 2 || t.wpts.length) {
-    await DB.put('tracks', t);
-    showTrack(t, false);
+  DB.kvDel('current').catch(e => logErr('kvDel', e));
+  try { localStorage.removeItem('offmap-current'); } catch (e) {}
+  safe('updateNav', updateNav);
+  if (keep) {
+    safe('showTrack', () => showTrack(t, false));
     openSheet('trackDone', t);
+    safe('afterFinish', () => afterFinishHooks(t));
   } else toast('記錄點太少，未儲存軌跡');
 }
 $('#btnStart').onclick = () => rec.on ? stopRec() : startRec();
@@ -386,6 +420,7 @@ $('#btnWpt').onclick = async () => {
 
 /* 省電暗幕 */
 $('#btnDim').onclick = () => { $('#dim').classList.remove('hidden'); tick(); };
+$('#btnDimDock').onclick = () => { $('#dim').classList.remove('hidden'); tick(); };
 let lastTap = 0;
 $('#dim').addEventListener('click', () => {
   const now = Date.now();
@@ -404,8 +439,12 @@ async function setActiveRoute(id, fit) {
       route = r; route.prep = prepRoute(r.pts);
       const ll = r.pts.map(p => [p[0], p[1]]);
       if (ll.length > 1) {
-        L.polyline(ll, { color: '#fff', weight: 8.5, opacity: .9, interactive: false }).addTo(routeLayer);
-        L.polyline(ll, { color: '#2F6FDB', weight: 4.5, opacity: .95, interactive: false }).addTo(routeLayer);
+        try { drawRouteLine(route, routeLayer); }
+        catch (e) {
+          logErr('drawRouteLine', e);
+          L.polyline(ll, { color: '#fff', weight: 8.5, opacity: .9, interactive: false }).addTo(routeLayer);
+          L.polyline(ll, { color: '#2F6FDB', weight: 4.5, opacity: .95, interactive: false }).addTo(routeLayer);
+        }
         L.marker(ll[0], { icon: pinIcon('start'), interactive: false }).addTo(routeLayer);
         L.marker(ll[ll.length - 1], { icon: pinIcon('end'), interactive: false }).addTo(routeLayer);
       }
@@ -422,10 +461,12 @@ async function setActiveRoute(id, fit) {
 }
 function navInfo() {
   if (!route || route.pts.length < 2 || !fix) return null;
-  const n = nearestOnRoute([fix.lat, fix.lon], route.pts, route.prep.cum);
+  const n = nearestOnRouteNear([fix.lat, fix.lon], route.pts, route.prep.cum, route._lastAlong);
+  route._lastAlong = n.d < 200 ? n.along : null;
   const P = route.prep;
   const upDone = P.cumUp[n.i] + n.t * ((P.cumUp[n.i + 1] ?? P.cumUp[n.i]) - P.cumUp[n.i]);
-  return { ...n, left: Math.max(0, P.length - n.along), upLeft: Math.max(0, P.up - upDone), frac: P.length ? n.along / P.length : 0 };
+  const dnDone = P.cumDown[n.i] + n.t * ((P.cumDown[n.i + 1] ?? P.cumDown[n.i]) - P.cumDown[n.i]);
+  return { ...n, left: Math.max(0, P.length - n.along), upLeft: Math.max(0, P.up - upDone), downLeft: Math.max(0, P.down - dnDone), frac: P.length ? n.along / P.length : 0 };
 }
 
 /* ---------- 時間規劃：預估到達、日落、折返 ---------- */
@@ -486,14 +527,19 @@ function updateTimeRow() {
   const ti = timeInfo();
   if (!ti || (!rec.on && !route)) { row.classList.add('hidden'); warn.classList.add('hidden'); return; }
   const set = ti.sun.set, parts = [];
+  const tile = (lbl, val, cls = '') => `<div class="tt ${cls}"><span>${lbl}</span><b class="mono">${val}</b></div>`;
   if (route && ti.need != null) {
     if (ti.eta) {
       const cls = set && ti.eta > set ? 'dark' : set && ti.eta > set - 30 * 60e3 ? 'late' : '';
-      parts.push(`<span class="${cls}">預估到達 <b>${hhmm(ti.eta)}</b></span>`);
-    } else parts.push(`<span>約需 <b>${fmtHM(ti.need)}</b></span>`);
+      parts.push(tile('預估到達', hhmm(ti.eta), cls));
+    } else parts.push(tile('約需', fmtHM(ti.need)));
   }
-  if (set) parts.push(`<span>日落 <b>${hhmm(set)}</b>${!route && rec.on ? `（剩 ${fmtHM(set - Date.now())}）` : ''}</span>`);
-  if (ti.turnAt) parts.push(`<span class="${Date.now() > ti.turnAt ? 'dark' : ''}">最晚折返 <b>${hhmm(ti.turnAt)}</b></span>`);
+  if (set) {
+    const now = Date.now();
+    if (rec.on && now > set) parts.push(tile('天黑後', fmtHM(now - set), 'dark'));
+    else parts.push(tile(!route && rec.on ? `日落（剩 ${fmtHM(set - now)}）` : '日落', hhmm(set)));
+  }
+  if (ti.turnAt) parts.push(tile('最晚折返', hhmm(ti.turnAt), Date.now() > ti.turnAt ? 'dark' : 'warm'));
   row.innerHTML = parts.join('');
   row.classList.toggle('hidden', !parts.length);
 
@@ -528,14 +574,13 @@ function updateNav() {
     $('#rtName').textContent = route.name;
     const n = navInfo();
     if (n) {
-      $('#rtLeft').textContent = `剩 ${fmtKm(n.left)} km · ↑${Math.round(n.upLeft)} m`;
-      $('#rtBar').style.width = (n.frac * 100).toFixed(1) + '%';
+      $('#rtLeft').innerHTML = `剩 <b>${fmtKm(n.left)}</b> km · ↑ <b>${Math.round(n.upLeft)}</b> · ↓ <b>${Math.round(n.downLeft)}</b> m`;
       if (rec.on) checkOff(n);
     } else {
-      $('#rtLeft').textContent = `全長 ${fmtKm(route.prep.length)} km · ↑${Math.round(route.prep.up)} m`;
-      $('#rtBar').style.width = '0%';
+      $('#rtLeft').innerHTML = `全長 <b>${fmtKm(route.prep.length)}</b> km · ↑ <b>${Math.round(route.prep.up)}</b> · ↓ <b>${Math.round(route.prep.down)}</b> m`;
     }
-  }
+    safe('navHook', () => navHook(n));
+  } else safe('navHook', () => navHook(null));
   updateTimeRow();
   const c = $('#navCard');
   document.body.classList.toggle('has-nav', show);
@@ -560,7 +605,7 @@ function checkOff(n) {
   else if (d < th * 0.8) {
     if (off.on) {
       off.on = false;
-      if (NATIVE && document.visibilityState === 'hidden') notify('已回到路線', '繼續沿著藍色路線前進');
+      if (NATIVE && document.visibilityState === 'hidden') notify('已回到路線', '繼續沿著路線前進');
       else { if (S.beep) beep([660, 990], 0.14, 0.05); speak('已回到路線'); toast('已回到路線'); }
     }
     off.cnt = 0;
@@ -943,7 +988,7 @@ SHEETS.settings = {
       <div class="group">
         <div class="row"><div class="grow"><div class="t">瀏覽快取</div><div class="s">平常滑動地圖時自動暫存的圖磚</div></div><button class="mini red" id="btnClearSeen">清除</button></div>
       </div>`}
-      <p class="note">版本 2.4（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
+      <p class="note">版本 3.0（${NATIVE ? 'iPhone App' : '網頁版'}）· 所有資料（路線、軌跡、地圖）只存在這支 iPhone 上。</p>`;
     bindSeg('segOff', v => { S.offThreshold = +v; saveSettings(); renderSheet(); });
     bindSeg('segAcc', v => { S.minAcc = +v; saveSettings(); renderSheet(); });
     $('#swBeep').onchange = e => { S.beep = e.target.checked; saveSettings(); if (S.beep) { unlockAudio(); beep([880], 0.15); } };
@@ -1214,7 +1259,7 @@ async function chooseTurn() {
   const v = await ask('設定折返點', w.length ? '選一個航點當折返點，App 會依它計算最晚折返時間。' : '這條路線沒有航點，只能使用自動判斷。', btns);
   if (v === null) return;
   route.turn = v === '__auto' ? null : { lat: w[+v].lat, lon: w[+v].lon, name: w[+v].name };
-  const { prep, ...rec2 } = route;
+  const { prep, _slope, _targets, _lastAlong, ...rec2 } = route;
   await DB.put('routes', rec2);
   toast('已更新折返點'); updateNav(); renderSheet();
 }
@@ -1288,7 +1333,7 @@ window.addEventListener('online', netState); window.addEventListener('offline', 
 
 /* ---------- 啟動 ---------- */
 document.addEventListener('touchend', function once() { requestCompass(); document.removeEventListener('touchend', once); }, { passive: true });
-(async function init() {
+window.addEventListener('DOMContentLoaded', async function init() {
   setMode('off');
   if (NATIVE) {
     document.body.classList.add('native'); await NT.load();
@@ -1305,15 +1350,25 @@ document.addEventListener('touchend', function once() { requestCompass(); docume
   startGPS();
   if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   if (S.activeRoute) await setActiveRoute(S.activeRoute);
+  safe('startHooks', () => startHooks());
+  // 上次儲存失敗、暫放在備用位置的軌跡：補存進資料庫
   try {
-    const cur = await DB.kvGet('current');
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith('offmap-unsaved-')) continue;
+      const t = JSON.parse(localStorage.getItem(k));
+      if (t && t.id) { await DB.put('tracks', t); localStorage.removeItem(k); toast('已補存上次的軌跡：' + t.name, 3500); }
+    }
+  } catch (e) { logErr('unsaved', e); }
+  try {
+    let cur = await DB.kvGet('current').catch(() => null);
+    if (!cur) { try { cur = JSON.parse(localStorage.getItem('offmap-current') || 'null'); } catch (e) {} }
     if (cur && cur.start) {
       const r = await ask('有未結束的記錄', `${fmtDate(cur.start)} 開始，已記錄 ${fmtKm(cur.dist || 0)} km。`, [
         { label: '繼續記錄', value: 'go', cls: 'primary' }, { label: '結束並儲存', value: 'save' }, { label: '捨棄', value: 'drop', cls: 'ghost' }]);
       if (r === 'go') startRec(cur);
       else if (r === 'save') finishRec(cur);
-      else await DB.kvDel('current');
+      else { await DB.kvDel('current').catch(() => {}); try { localStorage.removeItem('offmap-current'); } catch (e) {} }
     }
-  } catch (e) {}
+  } catch (e) { logErr('resume', e); }
   updateNav();
-})();
+});

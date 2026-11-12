@@ -3,7 +3,8 @@
 
 /* ---------- IndexedDB ---------- */
 const DB = (() => {
-  let dbp;
+  let dbp = null;
+  const ver = { routes: 0, tracks: 0, areas: 0, kv: 0 };   // 資料有變動時 +1，給快取判斷要不要重讀
   const open = () => dbp || (dbp = new Promise((res, rej) => {
     const r = indexedDB.open('offmap', 1);
     r.onupgradeneeded = () => {
@@ -11,10 +12,16 @@ const DB = (() => {
       for (const s of ['routes', 'tracks', 'areas', 'kv'])
         if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: s === 'kv' ? 'k' : 'id' });
     };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
+    r.onsuccess = () => {
+      const d = r.result;
+      // iOS 在 App 長時間放背景後可能關掉資料庫連線：下次使用時自動重新連線
+      d.onclose = () => { dbp = null; };
+      d.onversionchange = () => { try { d.close(); } catch (e) {} dbp = null; };
+      res(d);
+    };
+    r.onerror = () => { dbp = null; rej(r.error); };
   }));
-  const tx = async (store, mode, fn) => {
+  const tx1 = async (store, mode, fn) => {
     const d = await open();
     return new Promise((res, rej) => {
       const t = d.transaction(store, mode);
@@ -24,10 +31,20 @@ const DB = (() => {
       t.onabort = () => rej(t.error);
     });
   };
+  const tx = async (store, mode, fn) => {
+    try { return await tx1(store, mode, fn); }
+    catch (e) {   // 連線失效：重新開啟資料庫再試一次
+      dbp = null;
+      await new Promise(r => setTimeout(r, 200));
+      return tx1(store, mode, fn);
+    }
+  };
+  const bump = (s, p) => p.then(v => { ver[s] = (ver[s] || 0) + 1; return v; });
   return {
+    ver,
     get: (s, k) => tx(s, 'readonly', o => o.get(k)),
-    put: (s, v) => tx(s, 'readwrite', o => o.put(v)),
-    del: (s, k) => tx(s, 'readwrite', o => o.delete(k)),
+    put: (s, v) => bump(s, tx(s, 'readwrite', o => o.put(v))),
+    del: (s, k) => bump(s, tx(s, 'readwrite', o => o.delete(k))),
     all: s => tx(s, 'readonly', o => o.getAll()),
     kvGet: async k => { const r = await tx('kv', 'readonly', o => o.get(k)); return r ? r.v : undefined; },
     kvSet: (k, v) => tx('kv', 'readwrite', o => o.put({ k, v })),
@@ -47,8 +64,40 @@ if (NATIVE) {
   }
 }
 /* 顯示未預期的錯誤，方便除錯 */
-window.addEventListener('error', e => { const t = document.getElementById('toast'); if (t) { t.textContent = '錯誤：' + e.message; t.classList.add('show'); } });
-window.addEventListener('unhandledrejection', e => { const t = document.getElementById('toast'); if (t) { t.textContent = '錯誤：' + (e.reason && e.reason.message || e.reason); t.classList.add('show'); } });
+const ERRLOG = [];
+function logErr(where, err) {
+  const msg = String(err && (err.message || err.reason && err.reason.message) || err || '').slice(0, 300);
+  if (!msg || /ResizeObserver loop/.test(msg)) return;
+  ERRLOG.push({ t: Date.now(), where, msg, stack: String(err && err.stack || '').split('\n').slice(0, 3).join(' | ').slice(0, 400) });
+  if (ERRLOG.length > 40) ERRLOG.shift();
+  try { localStorage.setItem('offmap-errlog', JSON.stringify(ERRLOG)); } catch (e) {}
+}
+try { ERRLOG.push(...JSON.parse(localStorage.getItem('offmap-errlog') || '[]').slice(-40)); } catch (e) {}
+window.addEventListener('error', e => {
+  logErr('window', e.error || e.message);
+  const t = document.getElementById('toast');
+  if (t) { t.textContent = '發生小錯誤，已記錄（設定 › 錯誤紀錄）'; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000); }
+});
+window.addEventListener('unhandledrejection', e => logErr('promise', e.reason));
+/* 安全執行：任何一個功能出錯都不影響其他功能 */
+function safe(where, fn) { try { const r = fn(); if (r && r.catch) r.catch(e => logErr(where, e)); return r; } catch (e) { logErr(where, e); } }
+
+/* 網路請求：一律有逾時；先用一般 fetch，原生 App 失敗時改用原生連線（不受跨網域限制） */
+async function netFetch(url, { method = 'GET', body = null, headers = {}, timeout = 15000, as = 'json' } = {}) {
+  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), timeout);
+  try {
+    const r = await fetch(url, { method, body, headers, signal: ctl.signal, cache: 'no-store', credentials: 'omit' });
+    if (!r.ok) { const e = new Error('HTTP ' + r.status); e.http = r.status; throw e; }
+    return as === 'json' ? await r.json() : await r.text();
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('連線逾時');   // 逾時就不再重試，避免等兩倍時間
+    if (e.http || !(NATIVE && NP.CapacitorHttp)) throw e;
+    const r = await NP.CapacitorHttp.request({ url, method, headers, data: body || undefined,
+      connectTimeout: timeout, readTimeout: timeout, responseType: as === 'json' ? 'json' : 'text' });
+    if (r.status < 200 || r.status >= 300) throw new Error('HTTP ' + r.status);
+    return as === 'json' && typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+  } finally { clearTimeout(tm); }
+}
 
 /* ---------- 設定 ---------- */
 const DEFAULTS = {
@@ -80,7 +129,7 @@ const dirName = b => DIRS[Math.round(b / 45) % 8];
 
 /* 路線前處理：累積距離、累積爬升 */
 function prepRoute(pts) {
-  const cum = [0], cumUp = [0];
+  const cum = [0], cumUp = [0], cumDown = [0];
   let up = 0, down = 0, ref = null, maxE = -Infinity, minE = Infinity;
   for (let i = 0; i < pts.length; i++) {
     if (i) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
@@ -91,9 +140,9 @@ function prepRoute(pts) {
       else if (e - ref >= 3) { up += e - ref; ref = e; }
       else if (ref - e >= 3) { down += ref - e; ref = e; }
     }
-    if (i) cumUp.push(up);
+    if (i) { cumUp.push(up); cumDown.push(down); }
   }
-  return { cum, cumUp, length: cum[cum.length - 1] || 0, up, down,
+  return { cum, cumUp, cumDown, length: cum[cum.length - 1] || 0, up, down,
     maxE: isFinite(maxE) ? maxE : null, minE: isFinite(minE) ? minE : null };
 }
 
@@ -115,6 +164,29 @@ function nearestOnRoute(p, pts, cum) {
   best.along = cum[best.i] + best.t * (cum[best.i + 1] - cum[best.i]);
   best.q = [a[0] + best.t * (b[0] - a[0]), a[1] + best.t * (b[1] - a[1])];
   return best;
+}
+
+/* 找最近點，但優先選在上次位置附近的路段（原路來回時去程、回程重疊，避免位置在兩段之間跳動） */
+function nearestOnRouteNear(p, pts, cum, lastAlong) {
+  const best = nearestOnRoute(p, pts, cum);
+  if (lastAlong == null || best.d > 200) return best;
+  if (Math.abs(best.along - lastAlong) < 600) return best;
+  const kx = 111320 * Math.cos(p[0] * RAD), ky = 110574;
+  let loc = null;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (cum[i + 1] < lastAlong - 300 || cum[i] > lastAlong + 900) continue;
+    const ax = (pts[i][1] - p[1]) * kx, ay = (pts[i][0] - p[0]) * ky;
+    const bx = (pts[i + 1][1] - p[1]) * kx, by = (pts[i + 1][0] - p[0]) * ky;
+    const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+    let t = L ? -(ax * dx + ay * dy) / L : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const x = ax + t * dx, y = ay + t * dy, d = Math.sqrt(x * x + y * y);
+    if (!loc || d < loc.d) loc = { d, i, t };
+  }
+  if (!loc || loc.d > best.d + 30) return best;
+  const a = pts[loc.i], b = pts[loc.i + 1];
+  loc.along = cum[loc.i] + loc.t * (cum[loc.i + 1] - cum[loc.i]);
+  loc.q = [a[0] + loc.t * (b[0] - a[0]), a[1] + loc.t * (b[1] - a[1])];
+  return loc;
 }
 
 /* ---------- 座標格式 ---------- */
